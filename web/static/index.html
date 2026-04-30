@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TradingAgents</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">⚡</div>
+      <div>
+        <div class="brand-title">TradingAgents</div>
+        <div class="brand-sub">multi-agent floor</div>
+      </div>
+    </div>
+    <button id="new-session-btn" class="primary-btn">+ New analysis</button>
+    <div class="section-label">Sessions</div>
+    <ul id="session-list" class="session-list"></ul>
+  </aside>
+
+  <main class="main">
+    <div id="view-empty" class="view view-empty hidden">
+      <div class="empty-card">
+        <h1>Welcome to the floor.</h1>
+        <p>Spin up a new analysis on the left, or pick a previous one to inspect what each agent thought.</p>
+      </div>
+    </div>
+
+    <div id="view-config" class="view view-config hidden">
+      <header class="page-header">
+        <h1>New analysis</h1>
+        <p class="subtle">Configure a multi-agent run. Each agent's reasoning will be available afterwards.</p>
+      </header>
+
+      <form id="config-form" class="config-grid">
+        <div class="field">
+          <label>Ticker</label>
+          <input id="f-ticker" placeholder="SPY, AAPL, 7203.T, 0700.HK" required />
+        </div>
+        <div class="field">
+          <label>Analysis date</label>
+          <input id="f-date" type="date" required />
+        </div>
+
+        <div class="field span-2">
+          <label>Analysts</label>
+          <div id="f-analysts" class="chip-row"></div>
+        </div>
+
+        <div class="field">
+          <label>Research depth</label>
+          <select id="f-depth">
+            <option value="1">Shallow (1 round)</option>
+            <option value="3">Medium (3 rounds)</option>
+            <option value="5">Deep (5 rounds)</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Output language</label>
+          <select id="f-language"></select>
+        </div>
+
+        <div class="field">
+          <label>Provider</label>
+          <select id="f-provider"></select>
+        </div>
+        <div class="field">
+          <label>Quick model</label>
+          <select id="f-quick"></select>
+        </div>
+        <div class="field">
+          <label>Deep model</label>
+          <select id="f-deep"></select>
+        </div>
+        <div class="field" id="f-thinking-wrap">
+          <label id="f-thinking-label">Thinking</label>
+          <select id="f-thinking"></select>
+        </div>
+
+        <div class="actions span-2">
+          <button type="submit" id="go-btn" class="go-btn">
+            <span class="go-btn-label">Let's go</span>
+            <span class="go-btn-spark">→</span>
+          </button>
+        </div>
+      </form>
+    </div>
+
+    <div id="view-session" class="view view-session hidden">
+      <header class="page-header session-header">
+        <div>
+          <h1 id="s-title">—</h1>
+          <p id="s-meta" class="subtle"></p>
+        </div>
+        <div class="status-pill" id="s-status">pending</div>
+      </header>
+
+      <section id="s-final" class="final-card">
+        <div class="final-card-head">
+          <h2>Final recommendation</h2>
+          <div class="final-card-tag" id="s-final-tag">awaiting</div>
+        </div>
+        <div id="s-final-body" class="final-body subtle">The Portfolio Manager will weigh in once the debate concludes…</div>
+      </section>
+
+      <section class="agents-section">
+        <h2>Agents</h2>
+        <p class="subtle">Click any agent to see what they thought.</p>
+        <div id="s-agents" class="agents-grid"></div>
+      </section>
+    </div>
+  </main>
+
+  <div id="agent-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <header class="modal-head">
+        <div>
+          <div id="m-team" class="modal-team subtle"></div>
+          <h2 id="m-title">Agent</h2>
+        </div>
+        <button id="m-close" class="ghost-btn" aria-label="Close">✕</button>
+      </header>
+      <div id="m-body" class="modal-body"></div>
+    </div>
+  </div>
+</body>
+</html>
