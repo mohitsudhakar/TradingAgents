@@ -8,7 +8,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 COPY . .
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir ".[web]"
 
 FROM python:3.12-slim
 
@@ -24,4 +24,8 @@ WORKDIR /home/appuser/app
 
 COPY --from=builder --chown=appuser:appuser /build .
 
-ENTRYPOINT ["tradingagents"]
+ENV TRADINGAGENTS_WEB_HOST=0.0.0.0 \
+    TRADINGAGENTS_WEB_PORT=8080
+EXPOSE 8080
+
+CMD ["python", "-m", "web"]
