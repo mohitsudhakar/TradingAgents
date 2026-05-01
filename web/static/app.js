@@ -26,6 +26,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   $("#portfolio-btn").addEventListener("click", openPortfolioView);
   $("#pf-add-row").addEventListener("click", () => addPortfolioRow());
   $("#pf-save").addEventListener("click", savePortfolio);
+  $("#s-export-btn").addEventListener("click", exportSession);
+  $("#b-export-btn").addEventListener("click", exportBatch);
   initSidebarSections();
   $("#config-form").addEventListener("submit", submitConfig);
   $("#batch-form").addEventListener("submit", submitBatch);
@@ -985,6 +987,29 @@ function closeBatchWebsocket() {
     try { state.batchWs.close(); } catch {}
     state.batchWs = null;
   }
+}
+
+// ---------- exports ----------
+
+function exportSession() {
+  if (!state.activeSessionId) return;
+  triggerDownload(`/api/sessions/${state.activeSessionId}/export.docx`);
+}
+
+function exportBatch() {
+  if (!state.activeBatchId) return;
+  triggerDownload(`/api/batches/${state.activeBatchId}/export.docx`);
+}
+
+function triggerDownload(href) {
+  // The endpoint sets Content-Disposition; navigating via a hidden link
+  // lets the browser handle the filename + save dialog.
+  const a = document.createElement("a");
+  a.href = href;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // ---------- sidebar collapsible sections ----------

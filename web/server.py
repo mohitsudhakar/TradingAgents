@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -19,6 +20,7 @@ from tradingagents.universe import universe_for_api
 
 from . import batch_storage, storage
 from .batch_runner import BatchRunner, build_batch
+from .exports import batch_to_docx, session_to_docx
 from .runner import (
     ANALYST_AGENT_NAMES,
     ANALYST_ORDER,
@@ -276,6 +278,42 @@ async def stream_batch(ws: WebSocket, bid: str) -> None:
         pass
     finally:
         runner.unsubscribe(queue)
+
+
+def _docx_response(blob: bytes, filename: str) -> Response:
+    return Response(
+        content=blob,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _safe_filename(*parts: str) -> str:
+    cleaned = "_".join(part for part in parts if part)
+    cleaned = re.sub(r"[^A-Za-z0-9_.\-]+", "_", cleaned).strip("_")
+    return cleaned or "export"
+
+
+@app.get("/api/sessions/{sid}/export.docx")
+async def export_session(sid: str) -> Response:
+    runner = _runners.get(sid)
+    session = runner.snapshot() if runner else storage.load(sid)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    blob = session_to_docx(session)
+    fname = _safe_filename(session.get("ticker", "session"), session.get("analysis_date", ""), sid[:8]) + ".docx"
+    return _docx_response(blob, fname)
+
+
+@app.get("/api/batches/{bid}/export.docx")
+async def export_batch(bid: str) -> Response:
+    runner = _batch_runners.get(bid)
+    batch = runner.snapshot() if runner else batch_storage.load(bid)
+    if not batch:
+        raise HTTPException(404, "Batch not found")
+    blob = batch_to_docx(batch)
+    fname = _safe_filename("basket", batch.get("analysis_date", ""), bid[:8]) + ".docx"
+    return _docx_response(blob, fname)
 
 
 @app.get("/api/portfolio")

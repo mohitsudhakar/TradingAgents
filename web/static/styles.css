@@ -663,6 +663,12 @@ body {
   gap: 12px;
   flex-wrap: wrap;
 }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
 .stats-line .stat {
   display: inline-flex;
   align-items: center;
