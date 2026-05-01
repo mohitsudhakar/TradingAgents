@@ -12,6 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents import portfolio
+from tradingagents.market_snapshot import fetch_snapshot_block
+
+from cli.stats_handler import StatsCallbackHandler
 
 from . import storage
 
@@ -40,6 +44,16 @@ FIXED_TEAMS: List[Tuple[str, List[str]]] = [
     ("Risk Management", ["Aggressive Analyst", "Neutral Analyst", "Conservative Analyst"]),
     ("Portfolio Management", ["Portfolio Manager"]),
 ]
+
+# Reverse map: each agent → the team it belongs to. Built once at import so the
+# runner can look up team membership in O(1) on every status transition.
+AGENT_TO_TEAM: Dict[str, str] = {}
+for _team_name, _agents in (
+    [("Analyst Team", list(ANALYST_AGENT_NAMES.values()))] + list(FIXED_TEAMS)
+):
+    for _agent in _agents:
+        AGENT_TO_TEAM[_agent] = _team_name
+
 
 # Maps each canonical report section to the agent that "owns" it for the UI.
 SECTION_AGENT = {
@@ -97,7 +111,51 @@ class SessionRunner:
                 return
             self.session["agent_status"][agent] = status
         self._broadcast({"type": "agent_status", "agent": agent, "status": status})
+        self._maybe_update_team_timing(agent, status)
         storage.save(self.session)
+
+    def _maybe_update_team_timing(self, agent: str, status: str) -> None:
+        """Record team start/end timestamps as agents transition through statuses.
+
+        A team starts the first time *any* of its agents goes ``in_progress`` and
+        ends when *every* of its agents present in ``agent_status`` is
+        ``completed``. The session-level ``team_timings`` dict accumulates the
+        result and is broadcast as a ``team_timing`` event for UI rendering.
+        """
+        team = AGENT_TO_TEAM.get(agent)
+        if not team:
+            return
+
+        with self._lock:
+            timings = self.session.setdefault("team_timings", {})
+            entry = timings.setdefault(team, {"started_at": None, "completed_at": None, "duration_s": None})
+
+            updated = False
+            if status == "in_progress" and entry["started_at"] is None:
+                entry["started_at"] = time.time()
+                updated = True
+
+            if status == "completed":
+                # Have we now finished every team member that is part of this session?
+                team_members = [
+                    a for a, t in AGENT_TO_TEAM.items()
+                    if t == team and a in self.session["agent_status"]
+                ]
+                all_done = team_members and all(
+                    self.session["agent_status"].get(a) == "completed"
+                    for a in team_members
+                )
+                if all_done and entry["completed_at"] is None:
+                    entry["completed_at"] = time.time()
+                    if entry["started_at"] is not None:
+                        entry["duration_s"] = round(entry["completed_at"] - entry["started_at"], 2)
+                    updated = True
+
+            if not updated:
+                return
+            payload = {"team": team, "timing": dict(entry)}
+
+        self._broadcast({"type": "team_timing", **payload})
 
     def _set_report(self, section: str, content: str) -> None:
         with self._lock:
@@ -123,6 +181,15 @@ class SessionRunner:
         with self._lock:
             self.session.update(fields)
         self._broadcast({"type": "session", "session": self.snapshot()})
+        storage.save(self.session)
+
+    def _set_stats(self, stats: Dict[str, Any]) -> None:
+        with self._lock:
+            prev = self.session.get("stats") or {}
+            if prev == stats:
+                return
+            self.session["stats"] = dict(stats)
+        self._broadcast({"type": "stats", "stats": dict(stats)})
         storage.save(self.session)
 
     # ---- entrypoint ----
@@ -157,16 +224,26 @@ class SessionRunner:
         config["output_language"] = sel.get("output_language", "English")
 
         analysts: List[str] = sel["analysts"]
-        graph = TradingAgentsGraph(analysts, config=config, debug=False)
+        stats_handler = StatsCallbackHandler()
+        graph = TradingAgentsGraph(
+            analysts, config=config, debug=False, callbacks=[stats_handler]
+        )
 
         self._set_session(status="running", started_at=time.time())
         if analysts:
             self._set_status(ANALYST_AGENT_NAMES[analysts[0]], "in_progress")
 
-        init_state = graph.propagator.create_initial_state(
+        position_block = portfolio.format_for_prompt(self.session["ticker"])
+        snapshot_block = fetch_snapshot_block(
             self.session["ticker"], self.session["analysis_date"]
         )
-        args = graph.propagator.get_graph_args()
+        init_state = graph.propagator.create_initial_state(
+            self.session["ticker"],
+            self.session["analysis_date"],
+            current_position=position_block,
+            market_snapshot=snapshot_block,
+        )
+        args = graph.propagator.get_graph_args(callbacks=[stats_handler])
 
         seen_msg_ids: set[str] = set()
         last = {
@@ -265,8 +342,13 @@ class SessionRunner:
             if chunk.get("final_trade_decision"):
                 self._set_report("final_trade_decision", chunk["final_trade_decision"])
 
+            # Snapshot accumulated token / call counts after each chunk so the UI
+            # streams progress instead of waiting for completion.
+            self._set_stats(stats_handler.get_stats())
+
         for name in list(self.session["agent_status"].keys()):
             self._set_status(name, "completed")
+        self._set_stats(stats_handler.get_stats())
         self._set_session(status="completed", completed_at=time.time())
 
     def _update_analyst_statuses(self, chunk: Dict[str, Any], analysts: List[str]) -> None:
@@ -380,4 +462,6 @@ def build_session(form: Dict[str, Any]) -> Dict[str, Any]:
         "report_sections": {},
         "messages": [],
         "error": None,
+        "stats": {"llm_calls": 0, "tool_calls": 0, "tokens_in": 0, "tokens_out": 0},
+        "team_timings": {},
     }

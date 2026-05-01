@@ -98,6 +98,13 @@ class OpenAIClient(BaseLLMClient):
         if self.provider == "openai":
             llm_kwargs["use_responses_api"] = True
 
+        # DeepSeek V4 defaults to thinking mode, which requires reasoning_content
+        # to be replayed in multi-turn requests that involve tool calls. The
+        # standard ChatOpenAI client does not round-trip reasoning_content, so
+        # tool-using agents hit a 400 on the second turn. Disable thinking.
+        if self.provider == "deepseek" and self.model.startswith("deepseek-v4"):
+            llm_kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
         return NormalizedChatOpenAI(**llm_kwargs)
 
     def validate_model(self) -> bool:

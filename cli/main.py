@@ -1044,8 +1044,13 @@ def run_analysis(checkpoint: bool = False):
         update_display(layout, spinner_text, stats_handler=stats_handler, start_time=start_time)
 
         # Initialize state and get graph args with callbacks
+        from tradingagents import portfolio as _portfolio
+        from tradingagents.market_snapshot import fetch_snapshot_block as _fetch_snap
         init_agent_state = graph.propagator.create_initial_state(
-            selections["ticker"], selections["analysis_date"]
+            selections["ticker"],
+            selections["analysis_date"],
+            current_position=_portfolio.format_for_prompt(selections["ticker"]),
+            market_snapshot=_fetch_snap(selections["ticker"], selections["analysis_date"]),
         )
         # Pass callbacks to graph config for tool execution tracking
         # (LLM tracking is handled separately via LLM constructor)

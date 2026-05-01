@@ -6,21 +6,31 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   config: null,
   sessions: [],
-  view: "empty",       // "empty" | "config" | "session"
+  batches: [],
+  view: "empty",       // "empty" | "config" | "session" | "batch-config" | "batch"
   activeSessionId: null,
+  activeBatchId: null,
   session: null,       // full session payload
+  batch: null,         // full batch payload
   ws: null,
+  batchWs: null,
 };
 
 // ---------- bootstrap ----------
 
 window.addEventListener("DOMContentLoaded", async () => {
-  await loadConfig();
-  await loadSessions();
-  setView(state.sessions.length ? "session-or-empty" : "empty");
-
+  // Attach listeners FIRST so the UI is responsive even if data load fails.
   $("#new-session-btn").addEventListener("click", openConfigView);
+  $("#new-batch-btn").addEventListener("click", openBatchConfigView);
+  $("#bf-provider").addEventListener("change", syncBatchProviderDependentFields);
+  $("#portfolio-btn").addEventListener("click", openPortfolioView);
+  $("#pf-add-row").addEventListener("click", () => addPortfolioRow());
+  $("#pf-save").addEventListener("click", savePortfolio);
+  initSidebarSections();
   $("#config-form").addEventListener("submit", submitConfig);
+  $("#batch-form").addEventListener("submit", submitBatch);
+  $("#bf-select-all").addEventListener("click", () => toggleAllBatchTickers(true));
+  $("#bf-clear").addEventListener("click", () => toggleAllBatchTickers(false));
   $("#m-close").addEventListener("click", closeAgentModal);
   $("#agent-modal").addEventListener("click", (e) => {
     if (e.target.id === "agent-modal") closeAgentModal();
@@ -28,6 +38,11 @@ window.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") closeAgentModal();
   });
+
+  try { await loadConfig();   } catch (e) { console.error("loadConfig failed:", e); }
+  try { await loadSessions(); } catch (e) { console.error("loadSessions failed:", e); }
+  try { await loadBatches();  } catch (e) { console.error("loadBatches failed:", e); }
+  setView(state.sessions.length ? "session-or-empty" : "empty");
 });
 
 async function loadConfig() {
@@ -49,6 +64,12 @@ async function loadSessions() {
   renderSessionList();
 }
 
+async function loadBatches() {
+  const res = await fetch("/api/batches");
+  state.batches = await res.json();
+  renderBatchList();
+}
+
 // ---------- views ----------
 
 function setView(v) {
@@ -64,6 +85,9 @@ function setView(v) {
   $("#view-empty").classList.toggle("hidden", v !== "empty");
   $("#view-config").classList.toggle("hidden", v !== "config");
   $("#view-session").classList.toggle("hidden", v !== "session");
+  $("#view-batch-config").classList.toggle("hidden", v !== "batch-config");
+  $("#view-batch").classList.toggle("hidden", v !== "batch");
+  $("#view-portfolio").classList.toggle("hidden", v !== "portfolio");
 }
 
 function openConfigView() {
@@ -301,8 +325,66 @@ function renderSession() {
   const pill = $("#s-status");
   pill.textContent = s.status;
   pill.className = `status-pill ${s.status}`;
+  renderSessionStats();
   renderFinal();
   renderAgents();
+}
+
+function renderSessionStats() {
+  $("#s-stats").innerHTML = formatStatsLine(state.session?.stats);
+  $("#s-team-timings").innerHTML = formatTeamTimings(state.session?.team_timings);
+}
+
+function formatTeamTimings(timings) {
+  if (!timings || !Object.keys(timings).length) return "";
+  // Render in canonical team order so the line stays stable across runs.
+  const order = ["Analyst Team", "Research Team", "Trading Team", "Risk Management", "Portfolio Management"];
+  const seen = new Set(order);
+  const teams = order.filter((t) => t in timings).concat(
+    Object.keys(timings).filter((t) => !seen.has(t))
+  );
+  const parts = [];
+  for (const team of teams) {
+    const t = timings[team] || {};
+    if (t.duration_s !== null && t.duration_s !== undefined) {
+      parts.push(`<span class="stat">${escapeHTML(team)} <strong>${fmtDuration(t.duration_s)}</strong></span>`);
+    } else if (t.started_at) {
+      const elapsed = Math.max(0, (Date.now() / 1000) - t.started_at);
+      parts.push(`<span class="stat">${escapeHTML(team)} <strong>${fmtDuration(elapsed)}…</strong></span>`);
+    }
+  }
+  return parts.join("");
+}
+
+function fmtDuration(secs) {
+  const s = Number(secs) || 0;
+  if (s < 1) return `${(s * 1000).toFixed(0)}ms`;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const r = Math.round(s - m * 60);
+  return `${m}m ${r}s`;
+}
+
+function formatStatsLine(stats) {
+  if (!stats) return "";
+  const tin = Number(stats.tokens_in || 0);
+  const tout = Number(stats.tokens_out || 0);
+  const calls = Number(stats.llm_calls || 0);
+  const tools = Number(stats.tool_calls || 0);
+  if (!tin && !tout && !calls && !tools) return "";
+  return [
+    `<span class="stat">↓ in <strong>${fmtNum(tin)}</strong></span>`,
+    `<span class="stat">↑ out <strong>${fmtNum(tout)}</strong></span>`,
+    `<span class="stat">Σ <strong>${fmtNum(tin + tout)}</strong> tokens</span>`,
+    `<span class="stat"><strong>${calls}</strong> LLM calls</span>`,
+    `<span class="stat"><strong>${tools}</strong> tool calls</span>`,
+  ].join("");
+}
+
+function fmtNum(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(2) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+  return String(n);
 }
 
 function renderFinal() {
@@ -481,6 +563,19 @@ function handleEvent(event) {
     s.messages.push(event.message);
     return;
   }
+
+  if (event.type === "stats") {
+    s.stats = event.stats;
+    renderSessionStats();
+    return;
+  }
+
+  if (event.type === "team_timing") {
+    s.team_timings = s.team_timings || {};
+    s.team_timings[event.team] = event.timing;
+    renderSessionStats();
+    return;
+  }
 }
 
 function updateAgentCard(agent) {
@@ -513,4 +608,545 @@ function renderMarkdown(s) {
     try { return marked.parse(s); } catch { /* fall through */ }
   }
   return `<pre>${escapeHTML(s)}</pre>`;
+}
+
+// ---------- batch flow ----------
+
+function renderBatchList() {
+  const ul = $("#batch-list");
+  ul.innerHTML = "";
+  if (!state.batches.length) {
+    const empty = document.createElement("div");
+    empty.className = "subtle";
+    empty.style.padding = "8px 4px";
+    empty.style.fontSize = "12px";
+    empty.textContent = "No baskets yet.";
+    ul.appendChild(empty);
+    return;
+  }
+  for (const b of state.batches) {
+    const li = document.createElement("li");
+    li.className = "session-item";
+    if (b.id === state.activeBatchId) li.classList.add("active");
+    li.innerHTML = `
+      <div class="session-ticker">
+        <span>Basket · ${b.ticker_count} tk</span>
+        <span class="session-status ${b.status}">${batchStatusLabel(b.status)}</span>
+      </div>
+      <div class="session-date">${b.analysis_date} · ${formatRelative(b.created_at)}</div>
+    `;
+    li.addEventListener("click", () => openBatch(b.id));
+    ul.appendChild(li);
+  }
+}
+
+function batchStatusLabel(s) {
+  if (s === "running")           return "● live";
+  if (s === "composing_report")  return "● writing";
+  if (s === "completed")         return "✓ done";
+  if (s === "failed")            return "✕ failed";
+  if (s === "completed_no_report") return "✓ partial";
+  return "queued";
+}
+
+function openBatchConfigView() {
+  if (!state.config) {
+    alert("Config didn't load — check the browser console (likely the server isn't running the new code; restart `python -m web` and hard-reload).");
+    return;
+  }
+  state.activeSessionId = null;
+  state.session = null;
+  state.activeBatchId = null;
+  state.batch = null;
+  closeWebsocket();
+  closeBatchWebsocket();
+  $$(".session-item").forEach((el) => el.classList.remove("active"));
+
+  // Initialize date if empty.
+  if (!$("#bf-date").value) $("#bf-date").value = new Date().toISOString().slice(0, 10);
+
+  populateBatchProviderSelect();
+  populateBatchAnalystChips();
+  populateBatchLanguageSelect();
+  syncBatchProviderDependentFields();
+  renderUniverse();
+
+  setView("batch-config");
+}
+
+function populateBatchProviderSelect() {
+  const sel = $("#bf-provider");
+  if (sel.options.length) return;
+  for (const p of state.config.providers) {
+    const opt = document.createElement("option");
+    opt.value = p.key;
+    opt.textContent = p.label;
+    sel.appendChild(opt);
+  }
+}
+
+function populateBatchAnalystChips() {
+  const wrap = $("#bf-analysts");
+  if (wrap.children.length) return;
+  for (const a of state.config.analysts) {
+    const c = document.createElement("div");
+    c.className = "chip active";
+    c.dataset.key = a.key;
+    c.textContent = a.label;
+    c.addEventListener("click", () => c.classList.toggle("active"));
+    wrap.appendChild(c);
+  }
+}
+
+function populateBatchLanguageSelect() {
+  const sel = $("#bf-language");
+  if (sel.options.length) return;
+  for (const lang of state.config.languages) {
+    const opt = document.createElement("option");
+    opt.value = lang;
+    opt.textContent = lang;
+    sel.appendChild(opt);
+  }
+}
+
+function syncBatchProviderDependentFields() {
+  const provider = $("#bf-provider").value;
+  const models = state.config.models[provider] || { quick: [], deep: [] };
+  fillModelSelect("#bf-quick", models.quick);
+  fillModelSelect("#bf-deep", models.deep);
+
+  const wrap = $("#bf-thinking-wrap");
+  const label = $("#bf-thinking-label");
+  const sel = $("#bf-thinking");
+  sel.innerHTML = "";
+
+  let opts = null;
+  if (provider === "google") {
+    label.textContent = "Thinking mode";
+    opts = [["high","Enable Thinking (recommended)"],["minimal","Minimal / Disable"]];
+  } else if (provider === "openai") {
+    label.textContent = "Reasoning effort";
+    opts = [["medium","Medium (default)"],["high","High (more thorough)"],["low","Low (faster)"]];
+  } else if (provider === "anthropic") {
+    label.textContent = "Effort level";
+    opts = [["high","High (recommended)"],["medium","Medium"],["low","Low (faster)"]];
+  }
+  if (!opts) { wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden");
+  for (const [v, lbl] of opts) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = lbl;
+    sel.appendChild(o);
+  }
+}
+
+function renderUniverse() {
+  const wrap = $("#bf-universe");
+  wrap.innerHTML = "";
+  const universe = state.config.universe || [];
+  if (!universe.length) {
+    wrap.innerHTML = `<div class="subtle" style="padding:18px">No instruments returned by /api/config. Restart <code>python -m web</code> so the server picks up the new universe.</div>`;
+    return;
+  }
+  for (const cat of universe) {
+    const card = document.createElement("div");
+    card.className = "universe-cat";
+    card.innerHTML = `
+      <div class="universe-cat-head">
+        <span>${escapeHTML(cat.category)}</span>
+        <button type="button" class="cat-toggle">all</button>
+      </div>
+      <div class="universe-tickers"></div>
+    `;
+    const tickerWrap = card.querySelector(".universe-tickers");
+    for (const tk of cat.tickers) {
+      const chip = document.createElement("div");
+      chip.className = "ticker-chip";
+      chip.dataset.symbol = tk.symbol;
+      chip.innerHTML = `<span>${escapeHTML(tk.symbol)}</span><span class="tk-name">${escapeHTML(tk.name)}</span>`;
+      chip.addEventListener("click", () => {
+        chip.classList.toggle("active");
+        updateBatchCount();
+      });
+      tickerWrap.appendChild(chip);
+    }
+    const toggle = card.querySelector(".cat-toggle");
+    toggle.addEventListener("click", () => {
+      const chips = tickerWrap.querySelectorAll(".ticker-chip");
+      const allOn = Array.from(chips).every((c) => c.classList.contains("active"));
+      chips.forEach((c) => c.classList.toggle("active", !allOn));
+      updateBatchCount();
+    });
+    wrap.appendChild(card);
+  }
+  updateBatchCount();
+}
+
+function toggleAllBatchTickers(on) {
+  $$("#bf-universe .ticker-chip").forEach((c) => c.classList.toggle("active", on));
+  updateBatchCount();
+}
+
+function updateBatchCount() {
+  const n = $$("#bf-universe .ticker-chip.active").length;
+  $("#bf-count").textContent = `(${n} selected)`;
+}
+
+async function submitBatch(e) {
+  e.preventDefault();
+  const btn = $("#batch-go-btn");
+  const tickers = $$("#bf-universe .ticker-chip.active").map((c) => c.dataset.symbol);
+  if (!tickers.length) {
+    alert("Select at least one instrument.");
+    return;
+  }
+  if (tickers.length > 30 && !confirm(`You picked ${tickers.length} instruments. This will run ${tickers.length} full multi-agent analyses sequentially. Continue?`)) {
+    return;
+  }
+  const analysts = $$("#bf-analysts .chip.active").map((c) => c.dataset.key);
+  if (!analysts.length) {
+    alert("Pick at least one analyst.");
+    return;
+  }
+
+  const provider = $("#bf-provider").value;
+  const providerObj = state.config.providers.find((p) => p.key === provider);
+  const payload = {
+    tickers,
+    analysis_date: $("#bf-date").value,
+    llm_provider: provider,
+    backend_url: providerObj?.url || null,
+    quick_think_llm: $("#bf-quick").value,
+    deep_think_llm: $("#bf-deep").value,
+    research_depth: parseInt($("#bf-depth").value, 10),
+    analysts,
+    output_language: $("#bf-language").value,
+    max_concurrency: parseInt($("#bf-concurrency").value, 10),
+  };
+  const thinking = $("#bf-thinking").value;
+  if (provider === "google")    payload.google_thinking_level = thinking;
+  if (provider === "openai")    payload.openai_reasoning_effort = thinking;
+  if (provider === "anthropic") payload.anthropic_effort = thinking;
+
+  btn.disabled = true;
+  btn.querySelector(".go-btn-label").textContent = "Spinning up…";
+  try {
+    const res = await fetch("/api/batches", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const summary = await res.json();
+    await loadBatches();
+    openBatch(summary.id);
+  } catch (err) {
+    alert(`Failed to start batch: ${err.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.querySelector(".go-btn-label").textContent = "Run basket";
+  }
+}
+
+async function openBatch(id) {
+  state.activeBatchId = id;
+  state.activeSessionId = null;
+  state.session = null;
+  closeWebsocket();
+  closeBatchWebsocket();
+  $$(".session-item").forEach((el) => el.classList.remove("active"));
+
+  setView("batch");
+  const res = await fetch(`/api/batches/${id}`);
+  if (!res.ok) {
+    alert("Batch not found");
+    setView("empty");
+    return;
+  }
+  state.batch = await res.json();
+  renderBatch();
+  renderBatchList();
+  if (["pending", "running", "composing_report"].includes(state.batch.status)) {
+    openBatchWebsocket(id);
+  }
+}
+
+function renderBatch() {
+  const b = state.batch;
+  $("#b-title").textContent = `Basket · ${b.analysis_date}`;
+  $("#b-meta").textContent = `${b.config.llm_provider} · deep=${b.config.deep_think_llm} · quick=${b.config.quick_think_llm} · depth=${b.config.research_depth} · ${b.items.length} instruments`;
+  const pill = $("#b-status");
+  pill.textContent = batchStatusLabel(b.status);
+  pill.className = `status-pill ${b.status}`;
+  renderBatchTotals();
+  renderBatchItems();
+  renderBatchReport();
+}
+
+function renderBatchTotals() {
+  $("#b-totals").innerHTML = formatStatsLine(state.batch?.totals);
+  $("#b-team-totals").innerHTML = formatTeamTotals(state.batch?.team_totals);
+}
+
+function formatTeamTotals(team_totals) {
+  if (!team_totals || !Object.keys(team_totals).length) return "";
+  const order = ["Analyst Team", "Research Team", "Trading Team", "Risk Management", "Portfolio Management"];
+  const seen = new Set(order);
+  const teams = order.filter((t) => t in team_totals).concat(
+    Object.keys(team_totals).filter((t) => !seen.has(t))
+  );
+  const parts = [];
+  for (const team of teams) {
+    const t = team_totals[team] || {};
+    if (!t.count) continue;
+    parts.push(
+      `<span class="stat">${escapeHTML(team)} ` +
+      `Σ <strong>${fmtDuration(t.total_s)}</strong> ` +
+      `<span style="color:var(--text-faint);font-size:11px">(avg ${fmtDuration(t.avg_s)} · max ${fmtDuration(t.max_s)} · n=${t.count})</span>` +
+      `</span>`
+    );
+  }
+  return parts.join("");
+}
+
+function renderBatchItems() {
+  const b = state.batch;
+  const wrap = $("#b-items");
+  wrap.innerHTML = "";
+  const done = b.items.filter((it) => it.status === "completed" || it.status === "failed").length;
+  $("#b-counter").textContent = `${done} / ${b.items.length}`;
+  for (const it of b.items) {
+    const div = document.createElement("div");
+    div.className = `batch-item ${it.status}`;
+    const tin = Number(it.stats?.tokens_in || 0);
+    const tout = Number(it.stats?.tokens_out || 0);
+    const tokenLabel = (tin || tout) ? `${fmtNum(tin + tout)} tok` : "";
+    div.innerHTML = `
+      <span class="bi-tk">${escapeHTML(it.ticker)}</span>
+      ${tokenLabel ? `<span class="bi-tokens">${tokenLabel}</span>` : ""}
+      <span class="bi-status">${escapeHTML(it.status)}</span>
+    `;
+    if (it.session_id) {
+      div.addEventListener("click", () => openSession(it.session_id));
+    }
+    wrap.appendChild(div);
+  }
+}
+
+function renderBatchReport() {
+  const b = state.batch;
+  const body = $("#b-report-body");
+  const tag = $("#b-report-tag");
+  if (b.report) {
+    body.classList.add("markdown");
+    body.classList.remove("subtle");
+    body.innerHTML = renderMarkdown(b.report);
+    tag.textContent = "ready";
+    tag.className = "final-card-tag";
+    return;
+  }
+  body.classList.remove("markdown");
+  body.classList.add("subtle");
+  if (b.status === "composing_report") {
+    body.textContent = "All instruments done — composing the consolidated report…";
+    tag.textContent = "writing";
+  } else if (b.status === "completed_no_report") {
+    body.textContent = `Analyses finished but report generation failed: ${b.report_error || "unknown error"}`;
+    tag.textContent = "failed";
+  } else if (b.status === "failed") {
+    body.textContent = `Batch failed: ${b.error || "unknown error"}`;
+    tag.textContent = "failed";
+  } else {
+    const done = b.items.filter((it) => it.status === "completed" || it.status === "failed").length;
+    body.textContent = `${done} of ${b.items.length} instruments analyzed. Report appears once all are done.`;
+    tag.textContent = "awaiting";
+  }
+}
+
+function openBatchWebsocket(id) {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/api/batches/${id}/stream`);
+  state.batchWs = ws;
+  ws.onmessage = (e) => {
+    if (state.activeBatchId !== id) return;
+    const event = JSON.parse(e.data);
+    handleBatchEvent(event);
+  };
+  ws.onclose = () => {
+    if (state.batchWs === ws) state.batchWs = null;
+  };
+}
+
+function closeBatchWebsocket() {
+  if (state.batchWs) {
+    try { state.batchWs.close(); } catch {}
+    state.batchWs = null;
+  }
+}
+
+// ---------- sidebar collapsible sections ----------
+
+const SIDEBAR_PREFS_KEY = "ta-sidebar-collapsed";
+
+function initSidebarSections() {
+  let collapsed = {};
+  try {
+    collapsed = JSON.parse(localStorage.getItem(SIDEBAR_PREFS_KEY) || "{}") || {};
+  } catch { collapsed = {}; }
+
+  for (const section of $$(".sidebar-section")) {
+    const key = section.dataset.section;
+    if (collapsed[key]) section.classList.add("collapsed");
+    const toggle = section.querySelector(".section-toggle");
+    toggle.addEventListener("click", () => {
+      section.classList.toggle("collapsed");
+      collapsed[key] = section.classList.contains("collapsed");
+      try { localStorage.setItem(SIDEBAR_PREFS_KEY, JSON.stringify(collapsed)); } catch {}
+    });
+  }
+}
+
+// ---------- portfolio editor ----------
+
+async function openPortfolioView() {
+  state.activeSessionId = null;
+  state.session = null;
+  state.activeBatchId = null;
+  state.batch = null;
+  closeWebsocket();
+  closeBatchWebsocket();
+  $$(".session-item").forEach((el) => el.classList.remove("active"));
+
+  setView("portfolio");
+  await loadPortfolio();
+}
+
+async function loadPortfolio() {
+  const tbody = $("#pf-rows");
+  tbody.innerHTML = "";
+  let positions = {};
+  try {
+    const res = await fetch("/api/portfolio");
+    if (res.ok) {
+      const data = await res.json();
+      positions = data.positions || {};
+    }
+  } catch (e) {
+    console.error("loadPortfolio failed:", e);
+  }
+  const entries = Object.entries(positions);
+  if (!entries.length) {
+    addPortfolioRow();
+  } else {
+    for (const [sym, pos] of entries) {
+      addPortfolioRow({ symbol: sym, qty: pos.qty, avg_cost: pos.avg_cost, notes: pos.notes });
+    }
+  }
+  updatePortfolioCount();
+}
+
+function addPortfolioRow(seed = {}) {
+  const tbody = $("#pf-rows");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input class="pf-symbol" placeholder="AAPL" value="${escapeAttr(seed.symbol)}" /></td>
+    <td><input class="pf-qty" type="number" step="any" placeholder="100" value="${escapeAttr(seed.qty)}" /></td>
+    <td><input class="pf-cost" type="number" step="any" placeholder="180.50" value="${escapeAttr(seed.avg_cost)}" /></td>
+    <td><input class="pf-notes" placeholder="core holding, long-term" value="${escapeAttr(seed.notes)}" /></td>
+    <td><button type="button" class="pf-del" aria-label="Remove row">×</button></td>
+  `;
+  tr.querySelector(".pf-del").addEventListener("click", () => {
+    tr.remove();
+    updatePortfolioCount();
+  });
+  for (const inp of tr.querySelectorAll("input")) {
+    inp.addEventListener("input", updatePortfolioCount);
+  }
+  tbody.appendChild(tr);
+  updatePortfolioCount();
+}
+
+function escapeAttr(v) {
+  if (v === null || v === undefined || v === "") return "";
+  return String(v).replace(/"/g, "&quot;");
+}
+
+function updatePortfolioCount() {
+  const rows = $$("#pf-rows tr");
+  const filled = rows.filter((r) => {
+    const sym = r.querySelector(".pf-symbol").value.trim();
+    const qty = r.querySelector(".pf-qty").value.trim();
+    return sym && qty && Number(qty) !== 0;
+  });
+  $("#pf-count").textContent = `${filled.length} position${filled.length === 1 ? "" : "s"}`;
+}
+
+async function savePortfolio() {
+  const rows = $$("#pf-rows tr");
+  const positions = {};
+  for (const r of rows) {
+    const sym = r.querySelector(".pf-symbol").value.trim().toUpperCase();
+    const qtyRaw = r.querySelector(".pf-qty").value.trim();
+    if (!sym || !qtyRaw) continue;
+    const qty = Number(qtyRaw);
+    if (!Number.isFinite(qty) || qty === 0) continue;
+    const entry = { qty };
+    const costRaw = r.querySelector(".pf-cost").value.trim();
+    if (costRaw) {
+      const c = Number(costRaw);
+      if (Number.isFinite(c)) entry.avg_cost = c;
+    }
+    const notes = r.querySelector(".pf-notes").value.trim();
+    if (notes) entry.notes = notes;
+    positions[sym] = entry;
+  }
+
+  const btn = $("#pf-save");
+  btn.disabled = true;
+  btn.querySelector(".go-btn-label").textContent = "Saving…";
+  try {
+    const res = await fetch("/api/portfolio", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ positions }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    btn.querySelector(".go-btn-label").textContent = "Saved";
+    setTimeout(() => { btn.querySelector(".go-btn-label").textContent = "Save"; btn.disabled = false; }, 1200);
+  } catch (err) {
+    alert(`Failed to save portfolio: ${err.message}`);
+    btn.querySelector(".go-btn-label").textContent = "Save";
+    btn.disabled = false;
+  }
+}
+
+function handleBatchEvent(event) {
+  if (!state.batch) return;
+  if (event.type === "batch") {
+    state.batch = event.batch;
+    renderBatch();
+    loadBatches();
+    if (["completed", "failed", "completed_no_report"].includes(event.batch.status)) {
+      closeBatchWebsocket();
+    }
+    return;
+  }
+  if (event.type === "item") {
+    state.batch.items[event.index] = event.item;
+    renderBatchItems();
+    renderBatchReport();
+    return;
+  }
+  if (event.type === "totals") {
+    state.batch.totals = event.totals;
+    if (event.team_totals) state.batch.team_totals = event.team_totals;
+    renderBatchTotals();
+    return;
+  }
 }
