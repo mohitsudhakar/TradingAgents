@@ -19,7 +19,12 @@ def create_research_manager(llm):
 
         investment_debate_state = state["investment_debate_state"]
 
-        prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
+        position_block = (state.get("current_position") or "").strip()
+        snapshot_block = (state.get("market_snapshot") or "").strip()
+        prefix_parts = [b for b in (snapshot_block, position_block) if b]
+        position_prefix = "\n\n".join(prefix_parts) + "\n\n" if prefix_parts else ""
+
+        prompt = f"""{position_prefix}As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
 
 {instrument_context}
 
@@ -32,7 +37,7 @@ def create_research_manager(llm):
 - **Underweight**: Cautious view; recommend trimming exposure
 - **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position
 
-Commit to a clear stance whenever the debate's strongest arguments warrant one; reserve Hold for situations where the evidence on both sides is genuinely balanced.
+If a USER'S CURRENT POSITION block is shown above, you MUST translate the rating into the side-specific vocabulary defined there. For example, if the user is short, "Buy" means add to the short, NOT buy stock. Reserve Hold for situations where the evidence on both sides is genuinely balanced.
 
 ---
 

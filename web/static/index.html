@@ -18,8 +18,22 @@
       </div>
     </div>
     <button id="new-session-btn" class="primary-btn">+ New analysis</button>
-    <div class="section-label">Sessions</div>
-    <ul id="session-list" class="session-list"></ul>
+    <button id="new-batch-btn" class="primary-btn secondary">▦ Daily basket</button>
+    <button id="portfolio-btn" class="primary-btn tertiary">⚖ My positions</button>
+    <div class="sidebar-section" data-section="batches">
+      <button type="button" class="section-label section-toggle">
+        <span class="section-chevron">▾</span>
+        <span>Batches</span>
+      </button>
+      <ul id="batch-list" class="session-list"></ul>
+    </div>
+    <div class="sidebar-section" data-section="sessions">
+      <button type="button" class="section-label section-toggle">
+        <span class="section-chevron">▾</span>
+        <span>Sessions</span>
+      </button>
+      <ul id="session-list" class="session-list"></ul>
+    </div>
   </aside>
 
   <main class="main">
@@ -91,11 +105,152 @@
       </form>
     </div>
 
+    <div id="view-portfolio" class="view view-portfolio hidden">
+      <header class="page-header">
+        <h1>My positions</h1>
+        <p class="subtle">Optional. Whatever you record here is shown to the Trader, Risk team, and Portfolio Manager so their recommendations are framed as a delta to your existing position. Leave a row blank to skip — analysts always stay objective.</p>
+      </header>
+
+      <div class="portfolio-card">
+        <div class="portfolio-toolbar">
+          <button type="button" id="pf-add-row" class="ghost-btn">+ Add row</button>
+          <div class="subtle" id="pf-count">0 positions</div>
+          <button type="button" id="pf-save" class="go-btn small-go">
+            <span class="go-btn-label">Save</span>
+            <span class="go-btn-spark">✓</span>
+          </button>
+        </div>
+        <div class="portfolio-table-wrap">
+          <table class="portfolio-table">
+            <thead>
+              <tr>
+                <th style="width:120px">Ticker</th>
+                <th style="width:140px">Quantity</th>
+                <th style="width:140px">Avg cost (optional)</th>
+                <th>Notes (optional)</th>
+                <th style="width:48px"></th>
+              </tr>
+            </thead>
+            <tbody id="pf-rows"></tbody>
+          </table>
+        </div>
+        <p class="subtle" style="margin-top:10px;font-size:12px">
+          Quantity is signed: positive = long, negative = short, blank or 0 = flat (skipped). All other fields optional.
+        </p>
+      </div>
+    </div>
+
+    <div id="view-batch-config" class="view view-batch-config hidden">
+      <header class="page-header">
+        <h1>Daily basket analysis</h1>
+        <p class="subtle">Pick instruments, run them sequentially, then get a consolidated report with ranked buys, sells, and cross-asset themes.</p>
+      </header>
+
+      <form id="batch-form" class="config-grid">
+        <div class="field">
+          <label>Analysis date</label>
+          <input id="bf-date" type="date" required />
+        </div>
+        <div class="field">
+          <label>Research depth</label>
+          <select id="bf-depth">
+            <option value="1">Shallow (1 round)</option>
+            <option value="3">Medium (3 rounds)</option>
+            <option value="5">Deep (5 rounds)</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label>Concurrency</label>
+          <select id="bf-concurrency">
+            <option value="1">1 (sequential)</option>
+            <option value="2">2 in parallel</option>
+            <option value="4" selected>4 in parallel</option>
+            <option value="8">8 in parallel</option>
+            <option value="12">12 in parallel</option>
+          </select>
+        </div>
+
+        <div class="field span-2">
+          <label>Analysts</label>
+          <div id="bf-analysts" class="chip-row"></div>
+        </div>
+
+        <div class="field">
+          <label>Output language</label>
+          <select id="bf-language"></select>
+        </div>
+        <div class="field">
+          <label>Provider</label>
+          <select id="bf-provider"></select>
+        </div>
+        <div class="field">
+          <label>Quick model</label>
+          <select id="bf-quick"></select>
+        </div>
+        <div class="field">
+          <label>Deep model</label>
+          <select id="bf-deep"></select>
+        </div>
+        <div class="field" id="bf-thinking-wrap">
+          <label id="bf-thinking-label">Thinking</label>
+          <select id="bf-thinking"></select>
+        </div>
+
+        <div class="field span-2">
+          <div class="basket-toolbar">
+            <label>Instruments <span id="bf-count" class="subtle">(0 selected)</span></label>
+            <div class="basket-actions">
+              <button type="button" class="ghost-btn" id="bf-select-all">Select all</button>
+              <button type="button" class="ghost-btn" id="bf-clear">Clear</button>
+            </div>
+          </div>
+          <div id="bf-universe" class="universe-grid"></div>
+        </div>
+
+        <div class="actions span-2">
+          <button type="submit" id="batch-go-btn" class="go-btn">
+            <span class="go-btn-label">Run basket</span>
+            <span class="go-btn-spark">→</span>
+          </button>
+          <p class="subtle batch-warn">⚠️ Each instrument is a full multi-agent analysis. Selecting many tickers means many LLM calls and significant runtime. Sequential — they run one after another.</p>
+        </div>
+      </form>
+    </div>
+
+    <div id="view-batch" class="view view-batch hidden">
+      <header class="page-header session-header">
+        <div>
+          <h1 id="b-title">Basket analysis</h1>
+          <p id="b-meta" class="subtle"></p>
+          <p id="b-totals" class="subtle stats-line"></p>
+        </div>
+        <div class="status-pill" id="b-status">pending</div>
+      </header>
+
+      <section class="batch-progress-card">
+        <div class="batch-progress-head">
+          <h2>Progress</h2>
+          <div id="b-counter" class="subtle">0 / 0</div>
+        </div>
+        <div id="b-items" class="batch-items"></div>
+      </section>
+
+      <section id="b-report-card" class="final-card">
+        <div class="final-card-head">
+          <h2>Daily comprehensive report</h2>
+          <div class="final-card-tag" id="b-report-tag">awaiting</div>
+        </div>
+        <div id="b-report-body" class="final-body subtle">The report is generated after every instrument has finished.</div>
+      </section>
+    </div>
+
     <div id="view-session" class="view view-session hidden">
       <header class="page-header session-header">
         <div>
           <h1 id="s-title">—</h1>
           <p id="s-meta" class="subtle"></p>
+          <p id="s-stats" class="subtle stats-line"></p>
         </div>
         <div class="status-pill" id="s-status">pending</div>
       </header>

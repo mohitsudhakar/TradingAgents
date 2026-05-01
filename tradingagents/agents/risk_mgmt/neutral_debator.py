@@ -15,8 +15,12 @@ def create_neutral_debator(llm):
         fundamentals_report = state["fundamentals_report"]
 
         trader_decision = state["trader_investment_plan"]
+        position_block = (state.get("current_position") or "").strip()
+        snapshot_block = (state.get("market_snapshot") or "").strip()
+        prefix_parts = [b for b in (snapshot_block, position_block) if b]
+        position_prefix = "\n\n".join(prefix_parts) + "\n\n" if prefix_parts else ""
 
-        prompt = f"""As the Neutral Risk Analyst, your role is to provide a balanced perspective, weighing both the potential benefits and risks of the trader's decision or plan. You prioritize a well-rounded approach, evaluating the upsides and downsides while factoring in broader market trends, potential economic shifts, and diversification strategies.Here is the trader's decision:
+        prompt = f"""{position_prefix}As the Neutral Risk Analyst, your role is to provide a balanced perspective, weighing both the potential benefits and risks of the trader's decision or plan. You prioritize a well-rounded approach, evaluating the upsides and downsides while factoring in broader market trends, potential economic shifts, and diversification strategies. If the user has a position above, weigh both extremes against *that specific position* and recommend the most balanced delta using the vocabulary in the position block. Here is the trader's decision:
 
 {trader_decision}
 

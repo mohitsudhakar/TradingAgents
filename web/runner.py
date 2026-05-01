@@ -12,6 +12,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents import portfolio
+from tradingagents.market_snapshot import fetch_snapshot_block
+
+from cli.stats_handler import StatsCallbackHandler
 
 from . import storage
 
@@ -125,6 +129,15 @@ class SessionRunner:
         self._broadcast({"type": "session", "session": self.snapshot()})
         storage.save(self.session)
 
+    def _set_stats(self, stats: Dict[str, Any]) -> None:
+        with self._lock:
+            prev = self.session.get("stats") or {}
+            if prev == stats:
+                return
+            self.session["stats"] = dict(stats)
+        self._broadcast({"type": "stats", "stats": dict(stats)})
+        storage.save(self.session)
+
     # ---- entrypoint ----
 
     def start(self) -> None:
@@ -157,16 +170,26 @@ class SessionRunner:
         config["output_language"] = sel.get("output_language", "English")
 
         analysts: List[str] = sel["analysts"]
-        graph = TradingAgentsGraph(analysts, config=config, debug=False)
+        stats_handler = StatsCallbackHandler()
+        graph = TradingAgentsGraph(
+            analysts, config=config, debug=False, callbacks=[stats_handler]
+        )
 
         self._set_session(status="running", started_at=time.time())
         if analysts:
             self._set_status(ANALYST_AGENT_NAMES[analysts[0]], "in_progress")
 
-        init_state = graph.propagator.create_initial_state(
+        position_block = portfolio.format_for_prompt(self.session["ticker"])
+        snapshot_block = fetch_snapshot_block(
             self.session["ticker"], self.session["analysis_date"]
         )
-        args = graph.propagator.get_graph_args()
+        init_state = graph.propagator.create_initial_state(
+            self.session["ticker"],
+            self.session["analysis_date"],
+            current_position=position_block,
+            market_snapshot=snapshot_block,
+        )
+        args = graph.propagator.get_graph_args(callbacks=[stats_handler])
 
         seen_msg_ids: set[str] = set()
         last = {
@@ -265,8 +288,13 @@ class SessionRunner:
             if chunk.get("final_trade_decision"):
                 self._set_report("final_trade_decision", chunk["final_trade_decision"])
 
+            # Snapshot accumulated token / call counts after each chunk so the UI
+            # streams progress instead of waiting for completion.
+            self._set_stats(stats_handler.get_stats())
+
         for name in list(self.session["agent_status"].keys()):
             self._set_status(name, "completed")
+        self._set_stats(stats_handler.get_stats())
         self._set_session(status="completed", completed_at=time.time())
 
     def _update_analyst_statuses(self, chunk: Dict[str, Any], analysts: List[str]) -> None:
@@ -380,4 +408,5 @@ def build_session(form: Dict[str, Any]) -> Dict[str, Any]:
         "report_sections": {},
         "messages": [],
         "error": None,
+        "stats": {"llm_calls": 0, "tool_calls": 0, "tokens_in": 0, "tokens_out": 0},
     }

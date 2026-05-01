@@ -39,7 +39,12 @@ def create_portfolio_manager(llm):
             else ""
         )
 
-        prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
+        position_block = (state.get("current_position") or "").strip()
+        snapshot_block = (state.get("market_snapshot") or "").strip()
+        prefix_parts = [b for b in (snapshot_block, position_block) if b]
+        position_prefix = "\n\n".join(prefix_parts) + "\n\n" if prefix_parts else ""
+
+        prompt = f"""{position_prefix}As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
 {instrument_context}
 
@@ -51,6 +56,8 @@ def create_portfolio_manager(llm):
 - **Hold**: Maintain current position, no action needed
 - **Underweight**: Reduce exposure, take partial profits
 - **Sell**: Exit position or avoid entry
+
+If a USER'S CURRENT POSITION block is shown above, you MUST translate the rating into the side-specific vocabulary defined there. Example mappings when the user is **short**: Buy = add to short; Overweight = lightly add to short; Hold = maintain short as-is; Underweight = reduce / cover part of the short; Sell = cover the short fully or reverse to long. NEVER recommend "reducing long exposure" if the user is short — they have none. Whenever possible, name a concrete size (e.g. "cover 25%", "add 0.5x current size") and a stop / target derived from the analysts' levels.
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**

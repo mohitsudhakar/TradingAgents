@@ -21,19 +21,27 @@ def create_trader(llm):
         company_name = state["company_of_interest"]
         instrument_context = build_instrument_context(company_name)
         investment_plan = state["investment_plan"]
+        position_block = (state.get("current_position") or "").strip()
+        snapshot_block = (state.get("market_snapshot") or "").strip()
+        prefix_parts = [b for b in (snapshot_block, position_block) if b]
+        position_prefix = "\n\n".join(prefix_parts) + "\n\n" if prefix_parts else ""
 
         messages = [
             {
                 "role": "system",
                 "content": (
                     "You are a trading agent analyzing market data to make investment decisions. "
-                    "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
-                    "Anchor your reasoning in the analysts' reports and the research plan."
+                    "Based on your analysis, provide a specific recommendation. "
+                    "If the user has an existing position (shown at the top of the user message), "
+                    "your recommendation MUST be expressed as a delta to that position using the "
+                    "vocabulary specified there. Anchor your reasoning in the analysts' reports "
+                    "and the research plan."
                 ),
             },
             {
                 "role": "user",
                 "content": (
+                    f"{position_prefix}"
                     f"Based on a comprehensive analysis by a team of analysts, here is an investment "
                     f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
                     f"insights from current technical market trends, macroeconomic indicators, and "

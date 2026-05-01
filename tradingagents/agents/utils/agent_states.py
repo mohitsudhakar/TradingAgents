@@ -71,3 +71,5 @@ class AgentState(MessagesState):
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
     past_context: Annotated[str, "Memory log context injected at run start (same-ticker decisions + cross-ticker lessons)"]
+    current_position: Annotated[str, "Optional pre-formatted description of the user's current position in this instrument (empty when flat)"]
+    market_snapshot: Annotated[str, "Pre-formatted directive block with the latest close + recent OHLC range, injected at run start to anchor agent prompts against price hallucination"]

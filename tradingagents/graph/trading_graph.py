@@ -301,10 +301,19 @@ class TradingAgentsGraph:
 
     def _run_graph(self, company_name, trade_date):
         """Execute the graph and write the resulting state to disk and memory log."""
-        # Initialize state — inject memory log context for PM.
+        # Initialize state — inject memory log context, position, and price anchor.
+        from tradingagents import portfolio as _portfolio
+        from tradingagents.market_snapshot import fetch_snapshot_block as _fetch_snap
+
         past_context = self.memory_log.get_past_context(company_name)
+        current_position = _portfolio.format_for_prompt(company_name)
+        market_snapshot = _fetch_snap(company_name, trade_date)
         init_agent_state = self.propagator.create_initial_state(
-            company_name, trade_date, past_context=past_context
+            company_name,
+            trade_date,
+            past_context=past_context,
+            current_position=current_position,
+            market_snapshot=market_snapshot,
         )
         args = self.propagator.get_graph_args()
 

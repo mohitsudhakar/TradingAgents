@@ -13,9 +13,12 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from tradingagents import portfolio
 from tradingagents.llm_clients.model_catalog import MODEL_OPTIONS
+from tradingagents.universe import universe_for_api
 
-from . import storage
+from . import batch_storage, storage
+from .batch_runner import BatchRunner, build_batch
 from .runner import (
     ANALYST_AGENT_NAMES,
     ANALYST_ORDER,
@@ -46,11 +49,19 @@ LANGUAGES = [
 
 _runners: Dict[str, SessionRunner] = {}
 _runners_lock = asyncio.Lock()
+_batch_runners: Dict[str, BatchRunner] = {}
+_batch_runners_lock = asyncio.Lock()
+
+
+def _register_session_runner(runner: SessionRunner) -> None:
+    """Register a SessionRunner spawned by a BatchRunner so /api/sessions works."""
+    _runners[runner.session["id"]] = runner
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     storage.ensure_dir()
+    batch_storage.ensure_dir()
     yield
 
 
@@ -77,6 +88,7 @@ async def get_config() -> Dict[str, Any]:
         "teams": teams,
         "section_agent": SECTION_AGENT,
         "languages": LANGUAGES,
+        "universe": universe_for_api(),
     }
 
 
@@ -170,6 +182,115 @@ async def stream(ws: WebSocket, sid: str) -> None:
         pass
     finally:
         runner.unsubscribe(queue)
+
+
+def _batch_summary(b: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": b["id"],
+        "analysis_date": b["analysis_date"],
+        "status": b["status"],
+        "created_at": b["created_at"],
+        "completed_at": b.get("completed_at"),
+        "ticker_count": len(b.get("items", [])),
+        "tickers": [it["ticker"] for it in b.get("items", [])],
+    }
+
+
+@app.get("/api/batches")
+async def list_batches() -> List[Dict[str, Any]]:
+    return [_batch_summary(b) for b in batch_storage.list_all()]
+
+
+class CreateBatchPayload(BaseModel):
+    tickers: List[str] = Field(min_length=1)
+    analysis_date: str = Field(min_length=8)
+    llm_provider: str
+    backend_url: Optional[str] = None
+    quick_think_llm: str
+    deep_think_llm: str
+    research_depth: int = 1
+    analysts: List[str] = []
+    google_thinking_level: Optional[str] = None
+    openai_reasoning_effort: Optional[str] = None
+    anthropic_effort: Optional[str] = None
+    output_language: str = "English"
+    max_concurrency: int = Field(4, ge=1, le=16)
+
+
+@app.post("/api/batches")
+async def create_batch(payload: CreateBatchPayload) -> Dict[str, Any]:
+    batch = build_batch(payload.model_dump())
+    batch_storage.save(batch)
+    loop = asyncio.get_running_loop()
+    runner = BatchRunner(batch, loop, register_session=_register_session_runner)
+    async with _batch_runners_lock:
+        _batch_runners[batch["id"]] = runner
+    runner.start()
+    return _batch_summary(batch)
+
+
+@app.get("/api/batches/{bid}")
+async def get_batch(bid: str) -> Dict[str, Any]:
+    runner = _batch_runners.get(bid)
+    if runner:
+        return runner.snapshot()
+    b = batch_storage.load(bid)
+    if not b:
+        raise HTTPException(404, "Batch not found")
+    return b
+
+
+@app.delete("/api/batches/{bid}")
+async def delete_batch(bid: str) -> Dict[str, Any]:
+    runner = _batch_runners.get(bid)
+    if runner and runner.batch.get("status") in ("running", "composing_report", "pending"):
+        raise HTTPException(409, "Cannot delete a running batch")
+    async with _batch_runners_lock:
+        _batch_runners.pop(bid, None)
+    batch_storage.delete(bid)
+    return {"deleted": True}
+
+
+@app.websocket("/api/batches/{bid}/stream")
+async def stream_batch(ws: WebSocket, bid: str) -> None:
+    await ws.accept()
+    runner = _batch_runners.get(bid)
+    if not runner:
+        b = batch_storage.load(bid)
+        if not b:
+            await ws.close(code=4404)
+            return
+        await ws.send_json({"type": "batch", "batch": b})
+        await ws.close()
+        return
+
+    queue = runner.subscribe()
+    await ws.send_json({"type": "batch", "batch": runner.snapshot()})
+    try:
+        while True:
+            event = await queue.get()
+            await ws.send_json(event)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        runner.unsubscribe(queue)
+
+
+@app.get("/api/portfolio")
+async def get_portfolio() -> Dict[str, Any]:
+    return {"positions": portfolio.load_all()}
+
+
+class PortfolioPayload(BaseModel):
+    positions: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+
+
+@app.put("/api/portfolio")
+async def put_portfolio(payload: PortfolioPayload) -> Dict[str, Any]:
+    portfolio.save_all(payload.positions)
+    return {"positions": portfolio.load_all()}
 
 
 def main() -> None:
