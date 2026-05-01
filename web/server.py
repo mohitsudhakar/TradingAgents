@@ -293,11 +293,33 @@ async def put_portfolio(payload: PortfolioPayload) -> Dict[str, Any]:
     return {"positions": portfolio.load_all()}
 
 
+def _raise_fd_limit(target: int = 8192) -> None:
+    """Raise the per-process file-descriptor soft limit.
+
+    macOS defaults to 256 FDs, which is far too low for a batch of 100+
+    concurrent yfinance + LLM HTTP clients. We bump the soft limit up to
+    ``target`` (or the system hard limit, whichever is lower).
+    """
+    try:
+        import resource
+
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        new_soft = min(target, hard) if hard != resource.RLIM_INFINITY else target
+        if new_soft > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+    except (ImportError, ValueError, OSError):
+        # `resource` isn't available on Windows; setrlimit may also refuse
+        # certain values. Falling back to the OS default is fine — the
+        # storage layer retries on EMFILE.
+        pass
+
+
 def main() -> None:
     """`python -m web` entrypoint."""
     import os
     import uvicorn
 
+    _raise_fd_limit()
     host = os.getenv("TRADINGAGENTS_WEB_HOST", "127.0.0.1")
     port = int(os.getenv("TRADINGAGENTS_WEB_PORT", "8765"))
     uvicorn.run("web.server:app", host=host, port=port, reload=False)

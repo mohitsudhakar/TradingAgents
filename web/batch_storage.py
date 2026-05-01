@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,12 +23,22 @@ def ensure_dir() -> None:
 
 
 def save(batch: Dict[str, Any]) -> None:
+    """Persist a batch record. Retries briefly on EMFILE so transient FD
+    pressure during a large concurrent batch doesn't drop a snapshot."""
     ensure_dir()
     bid = batch["id"]
+    payload = json.dumps(batch, default=str)
     with _LOCK:
         tmp = _path(bid).with_suffix(".tmp")
-        tmp.write_text(json.dumps(batch, default=str))
-        tmp.replace(_path(bid))
+        for attempt in range(5):
+            try:
+                tmp.write_text(payload)
+                tmp.replace(_path(bid))
+                return
+            except OSError as exc:
+                if exc.errno != errno.EMFILE or attempt == 4:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
 
 
 def load(batch_id: str) -> Optional[Dict[str, Any]]:
