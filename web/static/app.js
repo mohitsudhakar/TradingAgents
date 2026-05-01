@@ -332,6 +332,37 @@ function renderSession() {
 
 function renderSessionStats() {
   $("#s-stats").innerHTML = formatStatsLine(state.session?.stats);
+  $("#s-team-timings").innerHTML = formatTeamTimings(state.session?.team_timings);
+}
+
+function formatTeamTimings(timings) {
+  if (!timings || !Object.keys(timings).length) return "";
+  // Render in canonical team order so the line stays stable across runs.
+  const order = ["Analyst Team", "Research Team", "Trading Team", "Risk Management", "Portfolio Management"];
+  const seen = new Set(order);
+  const teams = order.filter((t) => t in timings).concat(
+    Object.keys(timings).filter((t) => !seen.has(t))
+  );
+  const parts = [];
+  for (const team of teams) {
+    const t = timings[team] || {};
+    if (t.duration_s !== null && t.duration_s !== undefined) {
+      parts.push(`<span class="stat">${escapeHTML(team)} <strong>${fmtDuration(t.duration_s)}</strong></span>`);
+    } else if (t.started_at) {
+      const elapsed = Math.max(0, (Date.now() / 1000) - t.started_at);
+      parts.push(`<span class="stat">${escapeHTML(team)} <strong>${fmtDuration(elapsed)}…</strong></span>`);
+    }
+  }
+  return parts.join("");
+}
+
+function fmtDuration(secs) {
+  const s = Number(secs) || 0;
+  if (s < 1) return `${(s * 1000).toFixed(0)}ms`;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const r = Math.round(s - m * 60);
+  return `${m}m ${r}s`;
 }
 
 function formatStatsLine(stats) {
@@ -535,6 +566,13 @@ function handleEvent(event) {
 
   if (event.type === "stats") {
     s.stats = event.stats;
+    renderSessionStats();
+    return;
+  }
+
+  if (event.type === "team_timing") {
+    s.team_timings = s.team_timings || {};
+    s.team_timings[event.team] = event.timing;
     renderSessionStats();
     return;
   }
@@ -850,6 +888,28 @@ function renderBatch() {
 
 function renderBatchTotals() {
   $("#b-totals").innerHTML = formatStatsLine(state.batch?.totals);
+  $("#b-team-totals").innerHTML = formatTeamTotals(state.batch?.team_totals);
+}
+
+function formatTeamTotals(team_totals) {
+  if (!team_totals || !Object.keys(team_totals).length) return "";
+  const order = ["Analyst Team", "Research Team", "Trading Team", "Risk Management", "Portfolio Management"];
+  const seen = new Set(order);
+  const teams = order.filter((t) => t in team_totals).concat(
+    Object.keys(team_totals).filter((t) => !seen.has(t))
+  );
+  const parts = [];
+  for (const team of teams) {
+    const t = team_totals[team] || {};
+    if (!t.count) continue;
+    parts.push(
+      `<span class="stat">${escapeHTML(team)} ` +
+      `Σ <strong>${fmtDuration(t.total_s)}</strong> ` +
+      `<span style="color:var(--text-faint);font-size:11px">(avg ${fmtDuration(t.avg_s)} · max ${fmtDuration(t.max_s)} · n=${t.count})</span>` +
+      `</span>`
+    );
+  }
+  return parts.join("");
 }
 
 function renderBatchItems() {
@@ -1085,6 +1145,7 @@ function handleBatchEvent(event) {
   }
   if (event.type === "totals") {
     state.batch.totals = event.totals;
+    if (event.team_totals) state.batch.team_totals = event.team_totals;
     renderBatchTotals();
     return;
   }

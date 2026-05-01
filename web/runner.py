@@ -45,6 +45,16 @@ FIXED_TEAMS: List[Tuple[str, List[str]]] = [
     ("Portfolio Management", ["Portfolio Manager"]),
 ]
 
+# Reverse map: each agent → the team it belongs to. Built once at import so the
+# runner can look up team membership in O(1) on every status transition.
+AGENT_TO_TEAM: Dict[str, str] = {}
+for _team_name, _agents in (
+    [("Analyst Team", list(ANALYST_AGENT_NAMES.values()))] + list(FIXED_TEAMS)
+):
+    for _agent in _agents:
+        AGENT_TO_TEAM[_agent] = _team_name
+
+
 # Maps each canonical report section to the agent that "owns" it for the UI.
 SECTION_AGENT = {
     "market_report": "Market Analyst",
@@ -101,7 +111,51 @@ class SessionRunner:
                 return
             self.session["agent_status"][agent] = status
         self._broadcast({"type": "agent_status", "agent": agent, "status": status})
+        self._maybe_update_team_timing(agent, status)
         storage.save(self.session)
+
+    def _maybe_update_team_timing(self, agent: str, status: str) -> None:
+        """Record team start/end timestamps as agents transition through statuses.
+
+        A team starts the first time *any* of its agents goes ``in_progress`` and
+        ends when *every* of its agents present in ``agent_status`` is
+        ``completed``. The session-level ``team_timings`` dict accumulates the
+        result and is broadcast as a ``team_timing`` event for UI rendering.
+        """
+        team = AGENT_TO_TEAM.get(agent)
+        if not team:
+            return
+
+        with self._lock:
+            timings = self.session.setdefault("team_timings", {})
+            entry = timings.setdefault(team, {"started_at": None, "completed_at": None, "duration_s": None})
+
+            updated = False
+            if status == "in_progress" and entry["started_at"] is None:
+                entry["started_at"] = time.time()
+                updated = True
+
+            if status == "completed":
+                # Have we now finished every team member that is part of this session?
+                team_members = [
+                    a for a, t in AGENT_TO_TEAM.items()
+                    if t == team and a in self.session["agent_status"]
+                ]
+                all_done = team_members and all(
+                    self.session["agent_status"].get(a) == "completed"
+                    for a in team_members
+                )
+                if all_done and entry["completed_at"] is None:
+                    entry["completed_at"] = time.time()
+                    if entry["started_at"] is not None:
+                        entry["duration_s"] = round(entry["completed_at"] - entry["started_at"], 2)
+                    updated = True
+
+            if not updated:
+                return
+            payload = {"team": team, "timing": dict(entry)}
+
+        self._broadcast({"type": "team_timing", **payload})
 
     def _set_report(self, section: str, content: str) -> None:
         with self._lock:
@@ -409,4 +463,5 @@ def build_session(form: Dict[str, Any]) -> Dict[str, Any]:
         "messages": [],
         "error": None,
         "stats": {"llm_calls": 0, "tool_calls": 0, "tokens_in": 0, "tokens_out": 0},
+        "team_timings": {},
     }

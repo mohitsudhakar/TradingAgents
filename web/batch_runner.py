@@ -112,6 +112,7 @@ class BatchRunner:
 
         final_session = child.snapshot()
         stats = final_session.get("stats") or {}
+        team_timings = final_session.get("team_timings") or {}
         self._update_item(
             idx,
             status=final_session.get("status", "unknown"),
@@ -120,23 +121,45 @@ class BatchRunner:
             trader_plan=final_session.get("report_sections", {}).get("trader_investment_plan"),
             error=final_session.get("error"),
             stats=stats,
+            team_timings=team_timings,
         )
         self._recompute_totals()
 
     def _recompute_totals(self) -> None:
-        """Sum per-item stats into a single batch total and broadcast it."""
+        """Sum per-item stats and team timings; broadcast both."""
         totals = {"llm_calls": 0, "tool_calls": 0, "tokens_in": 0, "tokens_out": 0}
+        # team_totals[team] = {total_s, count, max_s, avg_s}
+        team_acc: Dict[str, Dict[str, float]] = {}
         with self._lock:
             for it in self.batch["items"]:
                 s = it.get("stats") or {}
                 for k in totals:
                     totals[k] += int(s.get(k, 0) or 0)
-            prev = self.batch.get("totals") or {}
-            if prev == totals:
+
+                for team, t in (it.get("team_timings") or {}).items():
+                    duration = t.get("duration_s")
+                    if duration is None:
+                        continue
+                    acc = team_acc.setdefault(
+                        team, {"total_s": 0.0, "count": 0, "max_s": 0.0, "avg_s": 0.0}
+                    )
+                    acc["total_s"] += float(duration)
+                    acc["count"] += 1
+                    if duration > acc["max_s"]:
+                        acc["max_s"] = float(duration)
+            for team, acc in team_acc.items():
+                acc["avg_s"] = round(acc["total_s"] / acc["count"], 2) if acc["count"] else 0.0
+                acc["total_s"] = round(acc["total_s"], 2)
+                acc["max_s"] = round(acc["max_s"], 2)
+
+            prev_totals = self.batch.get("totals") or {}
+            prev_teams = self.batch.get("team_totals") or {}
+            if prev_totals == totals and prev_teams == team_acc:
                 return
             self.batch["totals"] = totals
+            self.batch["team_totals"] = team_acc
         batch_storage.save(self.batch)
-        self._broadcast({"type": "totals", "totals": totals})
+        self._broadcast({"type": "totals", "totals": totals, "team_totals": team_acc})
 
     def _run(self) -> None:
         self._patch(status="running", started_at=time.time())
@@ -324,6 +347,7 @@ def build_batch(form: Dict[str, Any]) -> Dict[str, Any]:
             "trader_plan": None,
             "error": None,
             "stats": {"llm_calls": 0, "tool_calls": 0, "tokens_in": 0, "tokens_out": 0},
+            "team_timings": {},
         }
         for t in tickers
     ]
@@ -340,6 +364,7 @@ def build_batch(form: Dict[str, Any]) -> Dict[str, Any]:
         "report_error": None,
         "error": None,
         "totals": {"llm_calls": 0, "tool_calls": 0, "tokens_in": 0, "tokens_out": 0},
+        "team_totals": {},
         "config": {
             "llm_provider": form["llm_provider"],
             "backend_url": form.get("backend_url"),
